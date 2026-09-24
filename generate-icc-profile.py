@@ -16,6 +16,7 @@ GREEN_XY = (0.3457, 0.5449)
 BLUE_XY  = (0.1542, 0.0996)
 WHITE_XY = (0.3125, 0.3281)
 
+# パネル最適化定数 (Sharp LQ140M1 専用)
 GAMMA_TARGET = 2.05
 GAMMA_REF = 2.20
 GAMMA_P = GAMMA_TARGET / GAMMA_REF  # 0.931818...
@@ -26,31 +27,38 @@ def calculate_lut_curves(entries=256):
     for i in range(entries):
         x = i / (entries - 1)
 
-        # 1. 2.05 実効ガンマによる輝度引き締め (x^(1/0.9318) = x^1.0732)
+        # 1. 全チャンネル共通のベースガンマ (実効ガンマ 2.05 で白黒コントラスト向上)
         base_y = math.pow(x, 1.0 / GAMMA_P) if x > 0 else 0.0
 
-        # 2. Gain 設定 (Sharp パネル用: ハイライトの青白さを抑えるためベース B-Gain を 0.865 に設定)
+        # 2. Gain 設定 (calgraypre.png の G 過剰特性を相殺するため G_gain = 0.975)
         r_gain = 1.000
-        g_gain = 0.980
+        g_gain = 0.975
 
-        # 3. Sharp LQ140M1 用 Dynamic B-Gain (中間調の -10% ドロップを相殺)
-        if x < 0.12:
-            b_gain = 0.865
+        # 3. Dynamic B-Gain (x=0.45 で Peak 0.935)
+        if x < 0.10:
+            b_gain = 0.870
         elif x < 0.45:
-            # 0.12 -> 0.45: 中間調の青のドロップ（5800K化）を補正するため Peak 0.940 へ持ち上げる
-            t = (x - 0.12) / 0.33
-            b_gain = 0.865 + t * (0.940 - 0.865)
-        elif x < 0.78:
-            # 0.45 -> 0.78: なだらかに下降
-            t = (x - 0.45) / 0.33
-            b_gain = 0.940 - t * (0.940 - 0.865)
+            # 0.10 -> 0.45: 中間調の青落ちを急速に補正
+            t = (x - 0.10) / 0.35
+            b_gain = 0.870 + t * (0.935 - 0.870)
+        elif x < 0.80:
+            # 0.45 -> 0.80: ハイライトに向けて補正量を下げる
+            t = (x - 0.45) / 0.35
+            b_gain = 0.935 - t * (0.935 - 0.875)
+        elif x < 0.85:
+            # 0.80 -> 0.85: ベース値へ軟着陸
+            t = (x - 0.80) / 0.05
+            b_gain = 0.875 - t * (0.875 - 0.870)
         else:
-            # 0.78 以上: 元々青が強いハイライト領域のため 0.865 に引き締める
-            b_gain = 0.865
+            b_gain = 0.870
 
-        r_curve.append(min(1.0, max(0.0, base_y * r_gain)))
-        g_curve.append(min(1.0, max(0.0, base_y * g_gain)))
-        b_curve.append(min(1.0, max(0.0, base_y * b_gain)))
+        r_val = min(1.0, max(0.0, base_y * r_gain))
+        g_val = min(1.0, max(0.0, base_y * g_gain))
+        b_val = min(1.0, max(0.0, base_y * b_gain))
+
+        r_curve.append(r_val)
+        g_curve.append(g_val)
+        b_curve.append(b_val)
 
     return r_curve, g_curve, b_curve
 
