@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Sharp LQ140M1 (Dell 0x1542) 専用 ICC / .cal プロファイル生成スクリプト
-- DEVICE_CLASS "DISPLAY" キーワード不具合修正版
+Sharp LQ140M1JW62 (Dell 3DNW3 / 6-bit FRC) パネル専用 1D LUT 生成スクリプト
 """
 
 import math
@@ -27,38 +26,33 @@ def calculate_lut_curves(entries=256):
     for i in range(entries):
         x = i / (entries - 1)
 
-        # 1. 全チャンネル共通のベースガンマ (実効ガンマ 2.05 で白黒コントラスト向上)
+        # 1. 白黒コントラストを高めるベースガンマ
         base_y = math.pow(x, 1.0 / GAMMA_P) if x > 0 else 0.0
 
-        # 2. Gain 設定 (calgraypre.png の G 過剰特性を相殺するため G_gain = 0.975)
+        # 2. LQ140M1JW62 用 R/G ゲイン
         r_gain = 1.000
-        g_gain = 0.975
+        g_gain = 0.978  # 緑かぶりを抑制
 
-        # 3. Dynamic B-Gain (x=0.45 で Peak 0.935)
-        if x < 0.10:
+        # 3. 6-bit FRC に配慮したマイルドな Dynamic B-Gain
+        if x < 0.12:
             b_gain = 0.870
         elif x < 0.45:
-            # 0.10 -> 0.45: 中間調の青落ちを急速に補正
-            t = (x - 0.10) / 0.35
-            b_gain = 0.870 + t * (0.935 - 0.870)
-        elif x < 0.80:
-            # 0.45 -> 0.80: ハイライトに向けて補正量を下げる
-            t = (x - 0.45) / 0.35
-            b_gain = 0.935 - t * (0.935 - 0.875)
+            # 中間調の青沈みを補正 (Peak 0.932)
+            t = (x - 0.12) / 0.33
+            b_gain = 0.870 + t * (0.932 - 0.870)
+        elif x < 0.78:
+            # ハイライトへ向けてスムーズに減衰
+            t = (x - 0.45) / 0.33
+            b_gain = 0.932 - t * (0.932 - 0.875)
         elif x < 0.85:
-            # 0.80 -> 0.85: ベース値へ軟着陸
-            t = (x - 0.80) / 0.05
+            t = (x - 0.78) / 0.07
             b_gain = 0.875 - t * (0.875 - 0.870)
         else:
             b_gain = 0.870
 
-        r_val = min(1.0, max(0.0, base_y * r_gain))
-        g_val = min(1.0, max(0.0, base_y * g_gain))
-        b_val = min(1.0, max(0.0, base_y * b_gain))
-
-        r_curve.append(r_val)
-        g_curve.append(g_val)
-        b_curve.append(b_val)
+        r_curve.append(min(1.0, max(0.0, base_y * r_gain)))
+        g_curve.append(min(1.0, max(0.0, base_y * g_gain)))
+        b_curve.append(min(1.0, max(0.0, base_y * b_gain)))
 
     return r_curve, g_curve, b_curve
 
