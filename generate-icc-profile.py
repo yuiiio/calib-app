@@ -16,21 +16,24 @@ GREEN_XY = (0.3457, 0.5449)
 BLUE_XY  = (0.1542, 0.0996)
 WHITE_XY = (0.3125, 0.3281)
 
-GAMMA_P = 0.95
+GAMMA_TARGET = 2.05
+GAMMA_REF = 2.20
+GAMMA_P = GAMMA_TARGET / GAMMA_REF  # 0.931818...
+
 
 def calculate_lut_curves(entries=256):
     r_curve, g_curve, b_curve = [], [], []
 
     for i in range(entries):
         x = i / (entries - 1)
-        
-        # 1. ベースガンマ演算: y = x^(1/p) (p=0.95 -> 1/p=1.0526)
+
+        # 全チャンネル共通の目標ガンマ演算 (1 / 0.9318... = 1.07317...)
         base_y = math.pow(x, 1.0 / GAMMA_P) if x > 0 else 0.0
-        
-        # 2. GAIN 設定
+
+        # GAIN 設定
         r_gain, g_gain = 1.00, 0.98
-        
-        # 3. 青(B) の動的セグメント補間
+
+        # 青(B) の動的セグメント補間 (0.93 ベース)
         if x < 0.20:
             b_gain = 0.87
         elif x < 0.50:
@@ -47,7 +50,6 @@ def calculate_lut_curves(entries=256):
         b_curve.append(min(1.0, max(0.0, base_y * b_gain)))
 
     return r_curve, g_curve, b_curve
-
 
 def write_cal_file(filename, r_curve, g_curve, b_curve):
     entries = len(r_curve)
