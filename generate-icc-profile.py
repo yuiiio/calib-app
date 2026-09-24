@@ -20,30 +20,35 @@ GAMMA_TARGET = 2.05
 GAMMA_REF = 2.20
 GAMMA_P = GAMMA_TARGET / GAMMA_REF  # 0.931818...
 
-
 def calculate_lut_curves(entries=256):
     r_curve, g_curve, b_curve = [], [], []
 
     for i in range(entries):
         x = i / (entries - 1)
 
-        # 全チャンネル共通の目標ガンマ演算 (1 / 0.9318... = 1.07317...)
+        # 全チャンネル共通のベースガンマ (0.9318... ベース)
         base_y = math.pow(x, 1.0 / GAMMA_P) if x > 0 else 0.0
 
-        # GAIN 設定
+        # Gain 設定
         r_gain, g_gain = 1.00, 0.98
 
-        # 青(B) の動的セグメント補間 (0.93 ベース)
-        if x < 0.20:
-            b_gain = 0.87
-        elif x < 0.50:
-            t = (x - 0.20) / 0.30
-            b_gain = 0.87 + t * (0.925 - 0.87)
+        # CalMAN データに基づいた非対称 Dynamic B-Gain
+        if x < 0.10:
+            b_gain = 0.870
+        elif x < 0.45:
+            # 0.10 -> 0.45: 急速に青の落ち込みを補正 (ピーク 0.945 へ)
+            t = (x - 0.10) / 0.35
+            b_gain = 0.870 + t * (0.945 - 0.870)
         elif x < 0.80:
-            t = (x - 0.50) / 0.30
-            b_gain = 0.925 - t * (0.925 - 0.87)
+            # 0.45 -> 0.80: ハイライトへ向けてなだらかに下げる
+            t = (x - 0.45) / 0.35
+            b_gain = 0.945 - t * (0.945 - 0.880)
+        elif x < 0.85:
+            # 0.80 -> 0.85: クリッピング回避のためベース値 0.870 へ軟着陸
+            t = (x - 0.80) / 0.05
+            b_gain = 0.880 - t * (0.880 - 0.870)
         else:
-            b_gain = 0.87
+            b_gain = 0.870
 
         r_curve.append(min(1.0, max(0.0, base_y * r_gain)))
         g_curve.append(min(1.0, max(0.0, base_y * g_gain)))
