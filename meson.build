@@ -30,3 +30,16 @@ executable('calib-gamma',
   dependencies: [wayland_client, math_dep],
   install: false
 )
+
+lcms2_dep = dependency('lcms2', required: true)
+
+executable('load-icc-profile',
+  'load-icc-profile.c',
+  gamma_header,
+  gamma_code,
+  dependencies: [
+    lcms2_dep,
+    wayland_client, math_dep
+  ],
+  install: false
+)
