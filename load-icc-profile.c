@@ -15,7 +15,7 @@
 
 struct output_info {
     struct wl_output *output;
-    uint32_t name;
+    uint32_t global_id;
     char *output_name;
     struct output_info *next;
 };
@@ -51,7 +51,6 @@ static float interpolate(float x, float x0, float x1, float y0, float y1) {
     if (x1 == x0) return y0;
     return y0 + (x - x0) * (y1 - y0) / (x1 - x0);
 }
-#include <ctype.h>
 
 static float clampf(float val, float min, float max) {
     if (val < min) return min;
@@ -102,16 +101,14 @@ static bool load_cal_file(const char *filename, cal_data_t *cal) {
         return false;
     }
 
-    // 3. データの読み込み (BEGIN_DATA の次の行からスタート)
+    // 3. データの読み込み
     int count = 0;
     while (count < num_sets && fgets(line, sizeof(line), f)) {
-        // END_DATA が来たら終了
         if (strstr(line, "END_DATA") != NULL) {
             break;
         }
 
         float in, r, g, b;
-        // sscanf は先頭の空白・タブ・改行を自動で無視して 4 つの数値を探す
         if (sscanf(line, "%f %f %f %f", &in, &r, &g, &b) == 4) {
             cal->in[count] = in;
             cal->r[count]  = r;
@@ -147,7 +144,6 @@ static int create_anonymous_file(size_t size) {
     return fd;
 }
 
-
 static void apply_calibration(struct context *ctx, struct zwlr_gamma_control_v1 *control) {
     uint32_t size = ctx->gamma_size;
     size_t lut_bytes = size * sizeof(uint16_t) * 3;
@@ -173,7 +169,6 @@ static void apply_calibration(struct context *ctx, struct zwlr_gamma_control_v1 
 
     for (uint32_t i = 0; i < size; i++) {
         float x = (float)i / (float)(size - 1);
-
         float r_val = 0.0f, g_val = 0.0f, b_val = 0.0f;
 
         if (x <= cal->in[0]) {
@@ -195,18 +190,15 @@ static void apply_calibration(struct context *ctx, struct zwlr_gamma_control_v1 
             }
         }
 
-        // 0.0 ~ 1.0 に安全にクランプ
         r_val = clampf(r_val, 0.0f, 1.0f);
         g_val = clampf(g_val, 0.0f, 1.0f);
         b_val = clampf(b_val, 0.0f, 1.0f);
 
-        // 16-bit 整数 (0 ~ 65535) へマッピング
         r_table[i] = (uint16_t)(r_val * 65535.0f + 0.5f);
         g_table[i] = (uint16_t)(g_val * 65535.0f + 0.5f);
         b_table[i] = (uint16_t)(b_val * 65535.0f + 0.5f);
     }
 
-    // デバッグ出力: 生成された中間値と最大値の確認
     printf("  [LUT 生成結果] index [0]: R=%u, G=%u, B=%u\n", r_table[0], g_table[0], b_table[0]);
     printf("  [LUT 生成結果] index [%u]: R=%u, G=%u, B=%u\n", size - 1, r_table[size - 1], g_table[size - 1], b_table[size - 1]);
 
@@ -223,17 +215,41 @@ static void free_cal_data(cal_data_t *cal) {
     free(cal->b);
 }
 
+// --- wl_output イベントハンドラ (名前取得用) ---
+
+static void output_handle_geometry(void *data, struct wl_output *wl_output,
+                                   int32_t x, int32_t y, int32_t physical_width, int32_t physical_height,
+                                   int32_t subpixel, const char *make, const char *model, int32_t transform) {}
+static void output_handle_mode(void *data, struct wl_output *wl_output,
+                               uint32_t flags, int32_t width, int32_t height, int32_t refresh) {}
+static void output_handle_done(void *data, struct wl_output *wl_output) {}
+static void output_handle_scale(void *data, struct wl_output *wl_output, int32_t factor) {}
+
+static void output_handle_name(void *data, struct wl_output *wl_output, const char *name) {
+    struct output_info *info = data;
+    if (info->output_name) free(info->output_name);
+    info->output_name = strdup(name);
+}
+
+static void output_handle_description(void *data, struct wl_output *wl_output, const char *description) {}
+
+static const struct wl_output_listener output_listener = {
+    .geometry = output_handle_geometry,
+    .mode = output_handle_mode,
+    .done = output_handle_done,
+    .scale = output_handle_scale,
+    .name = output_handle_name,
+    .description = output_handle_description,
+};
+
 // --- zwlr_gamma_control_v1 イベントハンドラ ---
 
-static void gamma_control_handle_gamma_size(void *data,
-                                            struct zwlr_gamma_control_v1 *control,
-                                            uint32_t size) {
+static void gamma_control_handle_gamma_size(void *data, struct zwlr_gamma_control_v1 *control, uint32_t size) {
     struct context *ctx = data;
     ctx->gamma_size = size;
 }
 
-static void gamma_control_handle_failed(void *data,
-                                        struct zwlr_gamma_control_v1 *control) {
+static void gamma_control_handle_failed(void *data, struct zwlr_gamma_control_v1 *control) {
     struct context *ctx = data;
     fprintf(stderr, "Error: ガンマ制御の適用に失敗しました（他のアプリが制御中などの可能性があります）\n");
     ctx->failed = 1;
@@ -247,19 +263,21 @@ static const struct zwlr_gamma_control_v1_listener gamma_control_listener = {
 // --- Registry イベントハンドラ ---
 
 static void registry_handle_global(void *data, struct wl_registry *registry,
-                                   uint32_t name, const char *interface,
-                                   uint32_t version) {
+                                   uint32_t name, const char *interface, uint32_t version) {
     struct context *ctx = data;
 
     if (strcmp(interface, zwlr_gamma_control_manager_v1_interface.name) == 0) {
-        ctx->gamma_manager = wl_registry_bind(registry, name,
-            &zwlr_gamma_control_manager_v1_interface, 1);
+        ctx->gamma_manager = wl_registry_bind(registry, name, &zwlr_gamma_control_manager_v1_interface, 1);
     } else if (strcmp(interface, wl_output_interface.name) == 0) {
         struct output_info *info = calloc(1, sizeof(struct output_info));
-        info->name = name;
-        info->output = wl_registry_bind(registry, name, &wl_output_interface, 1);
+        info->global_id = name;
+        // wl_output バージョン 4 で bind して name イベントを受信可能にする
+        uint32_t bind_version = (version >= 4) ? 4 : version;
+        info->output = wl_registry_bind(registry, name, &wl_output_interface, bind_version);
         info->next = ctx->outputs;
         ctx->outputs = info;
+
+        wl_output_add_listener(info->output, &output_listener, info);
     }
 }
 
@@ -270,6 +288,17 @@ static const struct wl_registry_listener registry_listener = {
     .global_remove = registry_handle_global_remove,
 };
 
+static void cleanup_outputs(struct context *ctx) {
+    struct output_info *curr = ctx->outputs;
+    while (curr) {
+        struct output_info *next = curr->next;
+        if (curr->output_name) free(curr->output_name);
+        if (curr->output) wl_output_destroy(curr->output);
+        free(curr);
+        curr = next;
+    }
+    ctx->outputs = NULL;
+}
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
@@ -286,7 +315,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    printf("対象出力: %s\n", ctx.target_output);
+    printf("対象出力名: %s\n", ctx.target_output);
 
     ctx.display = wl_display_connect(NULL);
     if (!ctx.display) {
@@ -297,20 +326,39 @@ int main(int argc, char *argv[]) {
 
     ctx.registry = wl_display_get_registry(ctx.display);
     wl_registry_add_listener(ctx.registry, &registry_listener, &ctx);
+    
+    // 1回目のラウンドトリップ: グローバルオブジェクト(wl_output, gamma_manager)の列挙
+    wl_display_roundtrip(ctx.display);
+
+    // 2回目のラウンドトリップ: 各 wl_output の name イベント受信
     wl_display_roundtrip(ctx.display);
 
     if (!ctx.gamma_manager) {
         fprintf(stderr, "エラー: コンポジタが wlr-gamma-control-v1 をサポートしていません。\n");
+        cleanup_outputs(&ctx);
         free_cal_data(&ctx.cal);
         return 1;
     }
 
-    struct output_info *target_info = ctx.outputs;
+    // ターゲット出力の検索
+    struct output_info *target_info = NULL;
+    for (struct output_info *info = ctx.outputs; info != NULL; info = info->next) {
+        if (info->output_name) {
+            printf("[検出出力] ID: %u, Name: %s\n", info->global_id, info->output_name);
+            if (strcmp(info->output_name, ctx.target_output) == 0) {
+                target_info = info;
+            }
+        }
+    }
+
     if (!target_info) {
-        fprintf(stderr, "エラー: 有効な output を検出できませんでした。\n");
+        fprintf(stderr, "エラー: 指定された出力 '%s' が見つかりませんでした。\n", ctx.target_output);
+        cleanup_outputs(&ctx);
         free_cal_data(&ctx.cal);
         return 1;
     }
+
+    printf("[+] ターゲット出力 '%s' を確認しました。\n", target_info->output_name);
 
     struct zwlr_gamma_control_v1 *control =
         zwlr_gamma_control_manager_v1_get_gamma_control(ctx.gamma_manager, target_info->output);
@@ -320,6 +368,8 @@ int main(int argc, char *argv[]) {
 
     if (ctx.gamma_size == 0 || ctx.failed) {
         fprintf(stderr, "ガンマ制御の初期化に失敗しました。\n");
+        zwlr_gamma_control_v1_destroy(control);
+        cleanup_outputs(&ctx);
         free_cal_data(&ctx.cal);
         return 1;
     }
@@ -337,6 +387,7 @@ int main(int argc, char *argv[]) {
     }
 
     zwlr_gamma_control_v1_destroy(control);
+    cleanup_outputs(&ctx);
     wl_display_disconnect(ctx.display);
     free_cal_data(&ctx.cal);
     return 0;
