@@ -10,12 +10,11 @@
 #include <unistd.h>
 #include <wayland-client.h>
 
-// #include "wlr-gamma-control-v1-client-protocol.h"
 #include "wlr-gamma-control-unstable-v1-client-protocol.h"
 
 struct output_info {
     struct wl_output *output;
-    uint32_t name;
+    uint32_t global_id;
     char *output_name;
     struct output_info *next;
 };
@@ -46,6 +45,33 @@ static int create_anonymous_file(size_t size) {
     }
     return fd;
 }
+
+// --- wl_output イベントハンドラ (名前取得用) ---
+
+static void output_handle_geometry(void *data, struct wl_output *wl_output,
+                                   int32_t x, int32_t y, int32_t physical_width, int32_t physical_height,
+                                   int32_t subpixel, const char *make, const char *model, int32_t transform) {}
+static void output_handle_mode(void *data, struct wl_output *wl_output,
+                               uint32_t flags, int32_t width, int32_t height, int32_t refresh) {}
+static void output_handle_done(void *data, struct wl_output *wl_output) {}
+static void output_handle_scale(void *data, struct wl_output *wl_output, int32_t factor) {}
+
+static void output_handle_name(void *data, struct wl_output *wl_output, const char *name) {
+    struct output_info *info = data;
+    if (info->output_name) free(info->output_name);
+    info->output_name = strdup(name);
+}
+
+static void output_handle_description(void *data, struct wl_output *wl_output, const char *description) {}
+
+static const struct wl_output_listener output_listener = {
+    .geometry = output_handle_geometry,
+    .mode = output_handle_mode,
+    .done = output_handle_done,
+    .scale = output_handle_scale,
+    .name = output_handle_name,
+    .description = output_handle_description,
+};
 
 // --- zwlr_gamma_control_v1 イベントハンドラ ---
 
@@ -80,10 +106,15 @@ static void registry_handle_global(void *data, struct wl_registry *registry,
             &zwlr_gamma_control_manager_v1_interface, 1);
     } else if (strcmp(interface, wl_output_interface.name) == 0) {
         struct output_info *info = calloc(1, sizeof(struct output_info));
-        info->name = name;
-        info->output = wl_registry_bind(registry, name, &wl_output_interface, 1);
+        info->global_id = name;
+
+        // wl_output バージョン 4 で bind して name イベントを受信可能にする
+        uint32_t bind_version = (version >= 4) ? 4 : version;
+        info->output = wl_registry_bind(registry, name, &wl_output_interface, bind_version);
         info->next = ctx->outputs;
         ctx->outputs = info;
+
+        wl_output_add_listener(info->output, &output_listener, info);
     }
 }
 
@@ -132,9 +163,9 @@ static void apply_calibration(struct context *ctx, struct zwlr_gamma_control_v1 
         b_val = b_val > 1.0 ? 1.0 : (b_val < 0.0 ? 0.0 : b_val);
 
         // 16-bit 整数に変換 (0 ~ 65535)
-        r_table[i] = (uint16_t)(r_val * 65535.0);
-        g_table[i] = (uint16_t)(g_val * 65535.0);
-        b_table[i] = (uint16_t)(b_val * 65535.0);
+        r_table[i] = (uint16_t)(r_val * 65535.0 + 0.5);
+        g_table[i] = (uint16_t)(g_val * 65535.0 + 0.5);
+        b_table[i] = (uint16_t)(b_val * 65535.0 + 0.5);
     }
 
     munmap(lut, lut_bytes);
@@ -142,6 +173,18 @@ static void apply_calibration(struct context *ctx, struct zwlr_gamma_control_v1 
     // wlrootsのガンマ制御オブジェクトにfdを送信
     zwlr_gamma_control_v1_set_gamma(control, fd);
     close(fd);
+}
+
+static void cleanup_outputs(struct context *ctx) {
+    struct output_info *curr = ctx->outputs;
+    while (curr) {
+        struct output_info *next = curr->next;
+        if (curr->output_name) free(curr->output_name);
+        if (curr->output) wl_output_destroy(curr->output);
+        free(curr);
+        curr = next;
+    }
+    ctx->outputs = NULL;
 }
 
 int main(int argc, char *argv[]) {
@@ -175,15 +218,37 @@ int main(int argc, char *argv[]) {
 
     ctx.registry = wl_display_get_registry(ctx.display);
     wl_registry_add_listener(ctx.registry, &registry_listener, &ctx);
+
+    // 1回目: レジストリから wl_output グローバルオブジェクトを列挙
+    wl_display_roundtrip(ctx.display);
+
+    // 2回目: 各 wl_output から出力名 (name) イベントを受信して確定させる
     wl_display_roundtrip(ctx.display);
 
     if (!ctx.gamma_manager) {
         fprintf(stderr, "エラー: コンポジタが wlr-gamma-control-v1 をサポートしていません。\n");
+        cleanup_outputs(&ctx);
         return 1;
     }
 
-    // 対象の output オブジェクトを探索 (簡易実装: 最初のoutputを適用、実用時はxdg-output等で名前照合)
-    struct output_info *target_info = ctx.outputs; 
+    // 対象の output オブジェクトを名前で照合して探索
+    struct output_info *target_info = NULL;
+    for (struct output_info *info = ctx.outputs; info != NULL; info = info->next) {
+        if (info->output_name) {
+            printf("[検出出力] ID: %u, Name: %s\n", info->global_id, info->output_name);
+            if (strcmp(info->output_name, ctx.target_output) == 0) {
+                target_info = info;
+            }
+        }
+    }
+
+    if (!target_info) {
+        fprintf(stderr, "エラー: 指定された出力 '%s' が見つかりませんでした。\n", ctx.target_output);
+        cleanup_outputs(&ctx);
+        return 1;
+    }
+
+    printf("[+] ターゲット出力 '%s' を確認しました。\n", target_info->output_name);
 
     struct zwlr_gamma_control_v1 *control =
         zwlr_gamma_control_manager_v1_get_gamma_control(ctx.gamma_manager, target_info->output);
@@ -193,10 +258,12 @@ int main(int argc, char *argv[]) {
 
     if (ctx.gamma_size == 0 || ctx.failed) {
         fprintf(stderr, "ガンマ制御の初期化に失敗しました。\n");
+        zwlr_gamma_control_v1_destroy(control);
+        cleanup_outputs(&ctx);
         return 1;
     }
 
-    printf("Vega iGPU LUTサイズ: %u エントリ\n", ctx.gamma_size);
+    printf("ディスプレイ LUTサイズ: %u エントリ\n", ctx.gamma_size);
 
     // ハードウェアLUTへの書き込みと適用
     apply_calibration(&ctx, control);
@@ -204,12 +271,12 @@ int main(int argc, char *argv[]) {
 
     printf("キャリブレーション値をハードウェアLUTに適用しました。(Ctrl+Cで終了すると復元します)\n");
 
-    // Waylandクライアントとして常駐（プロセスが切れるとコンポジタがLUTをリセットするため）
+    // 常駐ループ
     while (wl_display_dispatch(ctx.display) != -1 && !ctx.failed) {
-        // イベントループ
     }
 
     zwlr_gamma_control_v1_destroy(control);
+    cleanup_outputs(&ctx);
     wl_display_disconnect(ctx.display);
     return 0;
 }
